@@ -109,6 +109,10 @@ class SpaceCar:
             return
         if self.last_spot is None:
             self.last_spot = spot
+            if spot > track.lap_length / 2:
+                # started on the grid behind the start line: crossing it begins lap 1, not ends it
+                self.laps = -1
+                self.progress = spot - track.lap_length
 
         change = spot - self.last_spot
         if change < -track.lap_length / 2:

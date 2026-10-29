@@ -1,11 +1,30 @@
-from game import *
+
+import pygame
+from settings import *
+pygame.init()
+from car import *
+from track import *
+from network import *
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+clock = pygame.time.Clock()
+font = pygame.font.SysFont(None, 18)
+
+track_img = pygame.image.load("assets/track.png").convert_alpha()
+track_border_img = pygame.image.load("assets/track_border.png").convert_alpha()
 
 
-def idle(car, track):
+def create_car_surface(color):
+    surface = pygame.Surface(CAR_SIZE, pygame.SRCALPHA)
+    surface.fill(color)
+    return surface
+
+
+def idle(car):
     car.reduce_speed()
 
 
-def keyboard(car, track):
+def keyboard(car):
     keys = pygame.key.get_pressed()
 
     if keys[pygame.K_a]:
@@ -21,8 +40,16 @@ def keyboard(car, track):
         car.reduce_speed()
 
 
+def ai(car,track):
+    rays = car.get_distances(track)
+    inputs = [ d/ RAY_LENGTH for d in rays ]
+    inputs.append(car.speed / MAX_SPEED)
+
+    forward, backward, left, right = car.br
+
+
 AGENTS = [
-    ("Rusil",   (255, 0, 0),     keyboard)
+    ("Rusil",   (255, 0, 0),     keyboard if TEST else idle)
    # ("ChatGPT", (255, 255, 255), idle),
    # ("Gemini",  (0, 0, 255),     idle),
    # ("Claude",  (255, 165, 0),   idle),
@@ -48,10 +75,7 @@ def draw(screen, cars, track, round_no):
 
     screen.blit(font.render(f"Round {round_no}", True, "white"), (10, 10))
     for i, car in enumerate(cars):
-        if car.finished:
-            status = f"FINISHED in {car.finish_frame / FPS:.2f}s"
-        else:
-            status = f"speed {car.speed:.1f}" if car.alive else "CRASHED"
+        status = f"speed {car.speed:.1f}" if car.alive else "CRASHED"
         label = font.render(f"{car.name}  {status}  distance {car.distance:.0f}", True, "white")
         screen.blit(label, (10, 26 + i * 16))
 
@@ -60,7 +84,7 @@ def draw(screen, cars, track, round_no):
 
 def main():
     running = True
-    track = load_track()
+    track = Track(track_img,track_border_img)
     cars = spawn_agents(AGENTS)
     round_no = 1
     round_frames = 0
@@ -72,12 +96,12 @@ def main():
 
         for car in cars:
             if car.alive:
-                car.controller(car, track)
+                car.controller(car)
                 car.step(track)
                 if TEST:
                     print(car.name, car.get_distances(track))
 
-
+        
         round_frames += 1
         if not any(car.alive for car in cars) or round_frames >= ROUND_FRAMES:
             cars = spawn_agents(AGENTS)
