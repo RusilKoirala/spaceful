@@ -1,1 +1,1 @@
-"""ChatGPT's independently trained Spaceful racer."""
+"""ChatGPT's neural racer. Training is an explicit, separate command."""

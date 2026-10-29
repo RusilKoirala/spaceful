@@ -1,10 +1,7 @@
 import copy
+import math
 import random
 
-
-def lerp(a, b, t):
-   
-    return a + (b - a) * t
 
 class Level:
     def __init__(self, inputCount, outputCount):
@@ -31,15 +28,13 @@ class Level:
         self.inputs = inputs
 
         for j in range(len(self.outputs)):
-            total = 0 
+            total = self.biases[j]
             for i in range(len(self.inputs)):
                 total += self.inputs[i] * self.weights[i][j]
-            
-            if total > self.biases[j]:
-                self.outputs[j] = 1
-            else:
-                self.outputs[j] = 0
-        
+
+            # tanh keeps the real strength of the signal (-1 to 1) instead of just 0 or 1
+            self.outputs[j] = math.tanh(total)
+
         return self.outputs
 
 
@@ -54,16 +49,19 @@ class NeuralNetwork:
         outputs= inputs
         for level in self.levels:
             outputs = level.feed_forward(outputs)
-        return outputs
+        # only the final buttons are on/off: pressed when the output is positive
+        return [1 if value > 0 else 0 for value in outputs]
 
-    def mutate(self, amount):
-      
+    def mutate(self, amount, strength=0.2):
+        # each weight and bias has an `amount` chance to get a small random nudge
         for level in self.levels:
             for j in range(len(level.biases)):
-                level.biases[j] = lerp(level.biases[j], random.uniform(-1, 1), amount)
+                if random.random() < amount:
+                    level.biases[j] += random.gauss(0, strength)
             for i in range(len(level.weights)):
                 for j in range(len(level.weights[i])):
-                    level.weights[i][j] = lerp(level.weights[i][j], random.uniform(-1, 1), amount)
+                    if random.random() < amount:
+                        level.weights[i][j] += random.gauss(0, strength)
 
 def breed(mom, dad):
     # Child brain: every weight and bias is picked from mom or dad at random

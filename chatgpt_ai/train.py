@@ -1,6 +1,8 @@
-"""Train a neural sensor controller using standard-library evolution.
+"""Explicit genetic training: uv run python -m chatgpt_ai.train.
 
-Run from the project root: uv run python -m chatgpt_ai.train
+No training happens on import. All initial weights, including biases, use the
+same Gaussian distribution. All mutations share one generation-wide strength.
+Every candidate is evaluated on every starting grid slot.
 """
 
 import argparse
@@ -9,127 +11,142 @@ import math
 import os
 from pathlib import Path
 import random
-import time
+import statistics
 
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
-
-from game import (
-    ROUND_FRAMES,
-    START_GRID,
-    SpaceCar,
-    create_car_surface,
-    load_track,
-)
-from .race import Brain
+from .brain import BRAIN_PATH, LAYERS, WEIGHT_COUNT, Brain, control
 
 
-ROOT = Path(__file__).resolve().parent
-INITIAL = [2.0, 2.0, 2.0, 3.0, 1.0, -2.0, 0.2, 0.8, 1.6, 3.0, 0.0, 0.0, 0.06]
-
-
-def evaluate(weights, track, slots=(0,), frame_limit=ROUND_FRAMES):
+def evaluate(game, track, image, weights, render):
     brain = Brain(weights)
+    scores = []
     results = []
-    surface = create_car_surface((70, 210, 180))
-    for slot in slots:
-        x, y, angle = START_GRID[slot]
-        car = SpaceCar(x, y, surface, "ChatGPT", angle)
-        for _ in range(frame_limit):
-            if not car.alive:
+    for slot, (x, y, angle) in enumerate(game.START_GRID):
+        car = game.SpaceCar(x, y, image, "ChatGPT", angle)
+        for frame in range(game.ROUND_FRAMES):
+            if frame % 32 == 0:
+                if any(event.type == game.pygame.QUIT for event in game.pygame.event.get()):
+                    raise KeyboardInterrupt
+            if not car.alive or car.finished:
                 break
-            brain.drive(car, track)
+            control(brain, car, track, game.RAY_LENGTH, game.MAX_SPEED)
             car.step(track)
-            if car.finished:
-                break
+            if render:
+                track.draw(game.screen)
+                car.draw(game.screen, track, show_rays=True)
+                game.pygame.display.flip()
+                game.clock.tick(game.FPS)
+        if car.finished:
+            score = 3.0 + (game.ROUND_FRAMES - car.finish_frame) / game.ROUND_FRAMES
+        else:
+            score = max(0.0, min(1.0, car.progress / track.lap_length))
+        scores.append(score)
         results.append({
             "slot": slot,
             "finished": bool(car.finished),
-            "frames": car.finish_frame if car.finished else car.frames_alive,
-            "progress": round(car.progress, 3),
-            "crashed": bool(car.crashed),
+            "finish_frame": car.finish_frame if car.finished else None,
+            "progress": float(car.progress),
         })
-    scores = [
-        2.0 * track.lap_length + (ROUND_FRAMES - r["frames"]) * 2.0
-        if r["finished"] else r["progress"]
-        for r in results
-    ]
-    # Favor the worst starting slot, then reward overall lap speed.
-    return min(scores) * 0.8 + sum(scores) / len(scores) * 0.2, results
+    # Reward reliability from arbitrary slots before optimizing lap times.
+    return 0.8 * min(scores) + 0.2 * statistics.fmean(scores), results
 
 
-def constrain(weights):
-    w = list(weights)
-    for i in (0, 1, 2):
-        w[i] = max(0.1, min(12.0, w[i]))
-    for i in (6, 7, 8):
-        w[i] = max(-4.0, min(8.0, w[i]))
-    w[12] = max(0.002, min(0.6, w[12]))
-    return w
-
-
-def save(weights, score, results, evaluations, elapsed):
+def save_brain(weights, fitness, results, generation, seed, game):
     payload = {
-        "architecture": "7 rays + speed; 4 tanh hidden neurons; steering and throttle heads",
-        "weights": weights,
-        "score": score,
-        "validation": results,
-        "evaluations": evaluations,
-        "training_seconds": round(elapsed, 2),
+        "source": "chatgpt_ai.train",
+        "layers": list(LAYERS),
+        "weights": list(weights),
+        "normalization": {"ray_length": game.RAY_LENGTH, "max_speed": game.MAX_SPEED},
+        "fitness": fitness,
+        "results": results,
+        "generation": generation,
+        "seed": seed,
     }
-    destination = ROOT / "brain.json"
-    temporary = destination.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, indent=2) + "\n")
-    temporary.replace(destination)
+    temporary = BRAIN_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, allow_nan=False, indent=2) + "\n")
+    temporary.replace(BRAIN_PATH)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--generations", type=int, default=45)
-    parser.add_argument("--population", type=int, default=16)
-    parser.add_argument("--seed", type=int, default=87191)
-    parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--generations", type=int, default=400)
+    parser.add_argument("--population", type=int, default=96)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--sigma", type=float, default=0.18)
+    parser.add_argument("--mutation-rate", type=float, default=0.3)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
+    if args.generations < 1 or args.population < 8:
+        parser.error("Use at least one generation and a population of at least eight")
+    if not math.isfinite(args.sigma) or args.sigma <= 0:
+        parser.error("--sigma must be finite and positive")
+    if not 0 < args.mutation_rate <= 1:
+        parser.error("--mutation-rate must be in (0, 1]")
+
+    if not args.render:
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        os.environ["SDL_AUDIODRIVER"] = "dummy"
+    # The documented game API is imported only when the user runs training.
+    import game
+
     rng = random.Random(args.seed)
-    track = load_track()
-    started = time.monotonic()
-    weights = INITIAL[:]
-    if (ROOT / "brain.json").exists():
-        weights = json.loads((ROOT / "brain.json").read_text())["weights"]
-    if args.validate:
-        score, results = evaluate(weights, track, range(len(START_GRID)))
-        print(json.dumps({"score": score, "results": results}, indent=2), flush=True)
-        return
+    population = [
+        [rng.gauss(0.0, 0.5) for _ in range(WEIGHT_COUNT)]
+        for _ in range(args.population)
+    ]
+    if args.resume:
+        population[0] = list(Brain.load().weights)
+    track = game.load_track()
+    image = game.create_car_surface((40, 200, 150))
+    best_fitness = -math.inf
+    stagnant = 0
+    elite_count = max(2, args.population // 12)
 
-    score, results = evaluate(weights, track)
-    evaluations = 1
-    best = weights[:]
-    elite = [(score, best)]
-    print(f"Initial score {score:.1f}: {results}", flush=True)
-    scales = [0.6, 0.6, 0.6, 0.5, 0.3, 0.5, 0.2, 0.4, 0.6, 0.3, 0.4, 0.4, 0.035]
-    for generation in range(args.generations):
-        candidates = elite[:]
-        temperature = max(0.12, 1.0 - generation / max(1, args.generations))
-        for _ in range(args.population):
-            parent = rng.choice(elite)[1]
-            child = constrain([
-                value + rng.gauss(0, scale * temperature)
-                for value, scale in zip(parent, scales)
-            ])
-            fitness, _ = evaluate(child, track)
-            evaluations += 1
-            candidates.append((fitness, child))
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        elite = candidates[:4]
-        score, best = elite[0]
-        print(f"Generation {generation + 1}/{args.generations}: {score:.1f}", flush=True)
-        # Persist a usable model throughout training, including interruption.
-        _, results = evaluate(best, track)
-        save(best, score, results, evaluations, time.monotonic() - started)
+    try:
+        for generation in range(args.generations):
+            ranked = []
+            for index, weights in enumerate(population):
+                fitness, results = evaluate(game, track, image, weights, args.render)
+                ranked.append((fitness, weights, results))
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    stagnant = 0
+                    save_brain(weights, fitness, results, generation, args.seed, game)
+                print(
+                    f"Generation {generation + 1}/{args.generations} "
+                    f"candidate {index + 1}/{args.population}: "
+                    f"fitness={fitness:.5f} best={best_fitness:.5f}",
+                    flush=True,
+                )
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            stagnant += 1
+            # Adapt one scalar shared by every weight, never per-weight ranges.
+            strength = args.sigma * (1.0 + min(stagnant, 40) / 10.0)
+            next_population = [list(item[1]) for item in ranked[:elite_count]]
 
-    score, results = evaluate(best, track, range(len(START_GRID)))
-    save(best, score, results, evaluations, time.monotonic() - started)
-    print(json.dumps({"score": score, "results": results}, indent=2), flush=True)
+            def parent():
+                return max(rng.sample(ranked, 4), key=lambda item: item[0])[1]
+
+            while len(next_population) < args.population:
+                if rng.random() < 0.05:
+                    child = [rng.gauss(0.0, 0.5) for _ in range(WEIGHT_COUNT)]
+                else:
+                    first, second = parent(), parent()
+                    # Some children mutate a single parent to preserve useful
+                    # hidden units; others use generic uniform crossover.
+                    crossover = rng.random() < 0.25
+                    child = []
+                    for a, b in zip(first, second):
+                        value = b if crossover and rng.random() < 0.5 else a
+                        if rng.random() < args.mutation_rate:
+                            value += rng.gauss(0.0, strength)
+                        child.append(value)
+                next_population.append(child)
+            population = next_population
+    except KeyboardInterrupt:
+        print("Stopped. The best evaluated brain remains saved.", flush=True)
+    finally:
+        game.pygame.quit()
 
 
 if __name__ == "__main__":

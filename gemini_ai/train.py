@@ -1,256 +1,187 @@
-"""Gemini AI Racer training script.
-
-Trains the neural network from scratch using neuroevolution (genetic algorithm).
-Runs headlessly with:
-    uv run python -m gemini_ai.train
-"""
-
-import argparse
 import os
-import random
 import sys
 import time
+import random
 
-# Headless training: do not open a graphical window
+# Headless training: must set SDL_VIDEODRIVER before importing game
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
+# Ensure package root is in sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from game import (
-    START_GRID,
-    ROUND_FRAMES,
-    create_car_surface,
     load_track,
+    create_car_surface,
     SpaceCar,
+    START_GRID,
+    RAY_LENGTH,
+    MAX_SPEED,
+    ROUND_FRAMES,
+    STALL_FRAMES,
+    MIN_PROGRESS,
 )
-from .model import (
-    NeuralNetwork,
-    extract_features,
-    interpret_outputs,
-    apply_actions,
-)
+
+try:
+    from .model import NeuralNetwork, apply_action
+except ImportError:
+    from gemini_ai.model import NeuralNetwork, apply_action
 
 
-def evaluate_car(network, track, car_image, grid_slot_idx=0, max_frames=ROUND_FRAMES):
-    """Simulates a single car driven by the neural network on the track.
-
-    Args:
-        network: NeuralNetwork instance.
-        track: Track instance.
-        car_image: Pygame surface for the car.
-        grid_slot_idx: Which START_GRID slot to place the car at.
-        max_frames: Max frames to simulate.
-
-    Returns:
-        dict with simulation outcome (finished, finish_frame, progress, frames_alive, crashed).
+def evaluate_population(population, track, car_img, grid_slot_idx=0):
+    """
+    Evaluates all individuals in the population simultaneously in the game environment.
+    Cars do not collide with each other, so evaluating them in parallel is fast.
     """
     gx, gy, g_angle = START_GRID[grid_slot_idx % len(START_GRID)]
-    car = SpaceCar(gx, gy, car_image, name="gemini_trainee", angle=g_angle)
 
-    while car.alive and car.frames_alive < max_frames and not car.finished:
-        features = extract_features(car, track)
-        outputs = network.forward(features)
-        throttle_action, steer_action = interpret_outputs(outputs)
-        apply_actions(car, throttle_action, steer_action)
-        car.step(track)
+    cars = [
+        SpaceCar(gx, gy, car_img, f"gemini_{i}", g_angle)
+        for i in range(len(population))
+    ]
 
-    return {
-        "finished": car.finished,
-        "finish_frame": car.finish_frame if car.finish_frame is not None else max_frames,
-        "progress": car.progress,
-        "frames_alive": car.frames_alive,
-        "crashed": car.crashed,
-        "laps": car.laps,
-    }
+    for frame in range(ROUND_FRAMES):
+        active_count = 0
+        for net, car in zip(population, cars):
+            if not car.alive or car.finished:
+                continue
 
+            active_count += 1
+            distances = car.get_distances(track)
+            inputs = [d / RAY_LENGTH for d in distances] + [car.speed / MAX_SPEED]
+            outputs = net.forward(inputs)
+            apply_action(car, outputs)
+            car.step(track)
 
-def compute_fitness(results):
-    """Calculates a scalar fitness score across multiple grid evaluations.
+        if active_count == 0:
+            break
 
-    Scoring rules:
-    - 1. Finishers are ranked by lap time (lower finish_frame = higher score).
-    - 2. Non-finishers are ranked by progress.
-    """
-    total_score = 0.0
-    for res in results:
-        if res["finished"]:
-            # Huge bonus for finishing, with higher score for faster lap times
-            lap_time = res["finish_frame"]
-            score = 100_000.0 + (ROUND_FRAMES - lap_time) * 50.0
+    # Calculate fitness strictly following the race scoring rules:
+    # 1. Finishers are ranked by lap time (finish_frame).
+    # 2. Non-finishers are ranked by progress.
+    scores = []
+    for net, car in zip(population, cars):
+        if car.finished:
+            # Finishing bonus + bonus for faster lap times
+            fitness = 100000.0 + (ROUND_FRAMES - car.finish_frame) * 50.0
         else:
-            # Rank primarily by progress
-            score = max(0.0, res["progress"])
-            if res["crashed"]:
-                score = max(0.0, score - 50.0)
+            # Maximizing forward track progress
+            fitness = max(0.0, float(car.progress))
+        scores.append((fitness, car.finished, car.finish_frame, float(car.progress)))
 
-        total_score += score
-
-    return total_score / len(results)
+    return scores
 
 
-def train(
-    generations=100,
-    pop_size=80,
-    grid_slots=(0, 1),
-    save_path="gemini_ai/brain.json",
-    elite_count=8,
-    mutation_rate=0.08,
-    mutation_power=0.15,
-):
-    """Main neuroevolution training loop."""
-    print("=" * 65)
-    print(" GEMINI AI RACER - NEUROEVOLUTION TRAINER")
-    print("=" * 65)
-    print(f"Generations    : {generations}")
-    print(f"Population size: {pop_size}")
-    print(f"Grid slots     : {grid_slots}")
-    print(f"Save path      : {save_path}")
-    print("=" * 65)
+def tournament_select(population, scores, k=4):
+    """Select the best individual from a random tournament of size k."""
+    indices = random.sample(range(len(population)), k)
+    best_idx = max(indices, key=lambda i: scores[i][0])
+    return population[best_idx]
 
-    print("Loading track and assets...")
+
+def train(generations=150, pop_size=60, elite_count=6):
     track = load_track()
-    car_surface = create_car_surface((0, 100, 255))
-    print(f"Track loaded. Lap length: {track.lap_length} px.\n")
+    car_img = create_car_surface((0, 210, 255))  # Gemini electric cyan
 
-    # Initialize population
-    population = []
-    # If a pre-existing brain file exists, seed the population with it
-    if os.path.exists(save_path):
-        try:
-            seed_net = NeuralNetwork.load(save_path)
-            population.append(seed_net)
-            print(f"Seeded population with existing brain from {save_path}")
-        except Exception:
-            pass
+    save_path = os.path.join(os.path.dirname(__file__), "brain.json")
 
-    while len(population) < pop_size:
-        population.append(NeuralNetwork([11, 16, 12, 2]))
+    # Initial population with weights sampled from a single Gaussian distribution
+    population = [NeuralNetwork(init_sigma=0.5) for _ in range(pop_size)]
 
     best_overall_fitness = -1.0
     best_overall_net = None
-    best_overall_lap_frame = float("inf")
+    best_finish_time = None
 
-    start_time = time.time()
+    print("=" * 65)
+    print("🚀 Starting Gemini AI Evolutionary Training")
+    print(f"Population: {pop_size} | Elites: {elite_count} | Generations: {generations}")
+    print(f"Brain save path: {save_path}")
+    print("=" * 65)
 
-    for gen in range(1, generations + 1):
-        gen_start = time.time()
+    try:
+        for gen in range(1, generations + 1):
+            start_t = time.time()
+            grid_slot = (gen - 1) % len(START_GRID)
+            scores = evaluate_population(population, track, car_img, grid_slot_idx=grid_slot)
 
-        # Evaluate entire population
-        fitness_scores = []
-        gen_finishers = 0
-        gen_best_lap = float("inf")
+            # Sort population by fitness descending
+            ranked = sorted(
+                zip(population, scores),
+                key=lambda pair: pair[1][0],
+                reverse=True,
+            )
 
-        for net in population:
-            results = []
-            for slot in grid_slots:
-                res = evaluate_car(net, track, car_surface, grid_slot_idx=slot)
-                results.append(res)
-                if res["finished"]:
-                    gen_finishers += 1
-                    if res["finish_frame"] < gen_best_lap:
-                        gen_best_lap = res["finish_frame"]
+            gen_best_net, (gen_best_fit, gen_finished, gen_time, gen_prog) = ranked[0]
+            avg_fit = sum(s[0] for s in scores) / len(scores)
+            elapsed = time.time() - start_t
 
-            fit = compute_fitness(results)
-            fitness_scores.append((fit, net, results))
+            # Update overall best
+            if gen_best_fit > best_overall_fitness:
+                best_overall_fitness = gen_best_fit
+                best_overall_net = gen_best_net.clone()
+                best_overall_net.save(save_path)
+                if gen_finished:
+                    best_finish_time = gen_time
+                status_update = " ⭐ (NEW BEST SAVED)"
+            else:
+                status_update = ""
 
-        # Sort population by descending fitness
-        fitness_scores.sort(key=lambda item: item[0], reverse=True)
+            # Format log line
+            if gen_finished:
+                res_str = f"🏁 FINISHED in {gen_time} frames ({gen_time / 60.0:.2f}s)"
+            else:
+                res_str = f"progress: {gen_prog:6.1f}px"
 
-        gen_best_fit = fitness_scores[0][0]
-        gen_best_net = fitness_scores[0][1]
-        gen_best_res = fitness_scores[0][2]
+            print(
+                f"Gen {gen:3d}/{generations} | {res_str} | "
+                f"Best Fit: {gen_best_fit:8.1f} | Avg: {avg_fit:6.1f} | "
+                f"{elapsed:4.2f}s{status_update}"
+            )
 
-        avg_fit = sum(item[0] for item in fitness_scores) / pop_size
-        elapsed = time.time() - gen_start
+            # Build next generation
+            next_population = []
 
-        # Check if improved overall
-        is_new_best = gen_best_fit > best_overall_fitness
-        if is_new_best:
-            best_overall_fitness = gen_best_fit
-            best_overall_net = gen_best_net.clone()
-            best_overall_net.save(save_path)
-            if gen_best_lap < best_overall_lap_frame:
-                best_overall_lap_frame = gen_best_lap
+            # 1. Elitism: preserve top performers
+            for i in range(elite_count):
+                next_population.append(ranked[i][0].clone())
 
-        # Status output
-        best_progress = max(r["progress"] for r in gen_best_res)
-        status_msg = f"Gen {gen:3d}/{generations:3d} | Best Fit: {gen_best_fit:8.1f} | Avg Fit: {avg_fit:8.1f} | Best Prog: {best_progress:6.1f} px"
-        if gen_best_lap < float("inf"):
-            lap_sec = gen_best_lap / 60.0
-            status_msg += f" | LAP FINISHED! Frame: {gen_best_lap} ({lap_sec:.2f}s)"
-        if is_new_best:
-            status_msg += " [*NEW BEST SAVED*]"
-        status_msg += f" ({elapsed:.2f}s)"
-        print(status_msg)
+            # 2. Reproduction via Crossover and Mutation
+            while len(next_population) < pop_size:
+                r = random.random()
+                if r < 0.70:
+                    # Crossover + mutation
+                    p1 = tournament_select(population, scores, k=4)
+                    p2 = tournament_select(population, scores, k=4)
+                    child = NeuralNetwork.crossover(p1, p2)
+                    child.mutate(rate=0.15, mutation_strength=0.10)
+                    next_population.append(child)
+                elif r < 0.95:
+                    # Single-parent mutation
+                    parent = tournament_select(population, scores, k=4)
+                    child = parent.clone()
+                    child.mutate(rate=0.15, mutation_strength=0.10)
+                    next_population.append(child)
+                else:
+                    # Genetic diversity: fresh immigrant
+                    next_population.append(NeuralNetwork(init_sigma=0.5))
 
-        if gen == generations:
-            break
+            population = next_population
 
-        # Selection and Breeding for next generation
-        new_population = []
+    except KeyboardInterrupt:
+        print("\n[!] Training interrupted by user.")
 
-        # 1. Elitism: preserve top elites untouched
-        for i in range(elite_count):
-            new_population.append(fitness_scores[i][1].clone())
-
-        # 2. Tournament selection function
-        def select_parent(k=4):
-            candidates = random.sample(fitness_scores[: pop_size // 2], min(k, pop_size // 2))
-            candidates.sort(key=lambda c: c[0], reverse=True)
-            return candidates[0][1]
-
-        # 3. Create offspring via crossover and mutation
-        while len(new_population) < pop_size:
-            parent1 = select_parent()
-            parent2 = select_parent()
-            child = NeuralNetwork.crossover(parent1, parent2)
-            child.mutate(rate=mutation_rate, power=mutation_power)
-            new_population.append(child)
-
-        population = new_population
-
-    total_time = time.time() - start_time
-    print("\n" + "=" * 65)
-    print(" TRAINING COMPLETE")
-    print(f" Total time: {total_time:.2f}s")
-    print(f" Best fitness: {best_overall_fitness:.1f}")
-    if best_overall_lap_frame < float("inf"):
-        print(f" Fastest Lap : {best_overall_lap_frame} frames ({best_overall_lap_frame / 60.0:.2f}s)")
-    print(f" Brain saved to: {save_path}")
+    print("=" * 65)
+    print("🏆 Training session completed!")
+    if best_finish_time is not None:
+        print(f"Best Lap Time: {best_finish_time} frames ({best_finish_time / 60.0:.2f}s)")
+    print(f"Best Fitness: {best_overall_fitness:.1f}")
+    if best_overall_net is not None:
+        best_overall_net.save(save_path)
+        print(f"Trained brain saved to: {save_path}")
     print("=" * 65)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train Gemini AI Racer using Neuroevolution")
-    parser.add_argument("--generations", type=int, default=80, help="Number of generations to train")
-    parser.add_argument("--pop-size", type=int, default=80, help="Population size per generation")
-    parser.add_argument(
-        "--slots",
-        type=str,
-        default="0,1,2,3,4,5",
-        help="Comma-separated list of START_GRID slot indices to evaluate on (e.g. 0,1,2)",
-    )
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default=os.path.join(os.path.dirname(__file__), "brain.json"),
-        help="Path to save the best brain JSON",
-    )
-    parser.add_argument("--elite-count", type=int, default=8, help="Number of elite networks to preserve")
-    parser.add_argument("--mutation-rate", type=float, default=0.08, help="Probability of mutating each weight")
-    parser.add_argument("--mutation-power", type=float, default=0.15, help="Standard deviation of mutations")
-
-    args = parser.parse_args()
-    slots = tuple(int(s.strip()) for s in args.slots.split(",") if s.strip())
-
-    train(
-        generations=args.generations,
-        pop_size=args.pop_size,
-        grid_slots=slots,
-        save_path=args.save_path,
-        elite_count=args.elite_count,
-        mutation_rate=args.mutation_rate,
-        mutation_power=args.mutation_power,
-    )
-
-
 if __name__ == "__main__":
-    main()
+    train()
+

@@ -1,51 +1,39 @@
-"""Sensor-only neural driver. All learned parameters live beside this file."""
+"""Race entry point; uses only the seven rays and current speed."""
 
-import json
-import math
-from pathlib import Path
+from functools import lru_cache
 
-
-class Brain:
-    """A small, symmetric neural network implemented with plain Python.
-
-    Three shared tanh neurons process the opposing sensor pairs. A fourth
-    neuron estimates corner urgency from the forward ray and speed. The
-    steering and throttle heads operate only on those activations.
-    """
-
-    def __init__(self, weights):
-        self.weights = list(weights)
-
-    def forward(self, distances, speed):
-        w = self.weights
-        rays = [max(0.0, min(1.0, d / 200.0)) for d in distances]
-        side = math.tanh(w[0] * (rays[0] - rays[6]))
-        diagonal = math.tanh(w[1] * (rays[1] - rays[5]))
-        ahead = math.tanh(w[2] * (rays[2] - rays[4]))
-        urgency = math.tanh(w[3] * (1.0 - rays[3]) + w[4] * speed / 2.0 + w[5])
-        steering = math.tanh(w[6] * side + w[7] * diagonal + w[8] * ahead)
-        throttle = math.tanh(w[9] + w[10] * urgency + w[11] * abs(steering))
-        return steering, throttle
-
-    def drive(self, car, track):
-        steering, throttle = self.forward(car.get_distances(track), car.speed)
-        if throttle >= 0.0:
-            car.move_forward()
-        else:
-            car.reduce_speed()
-        if steering > self.weights[12]:
-            car.rotate(left=True)
-        elif steering < -self.weights[12]:
-            car.rotate(right=True)
+from .brain import BRAIN_PATH, Brain, control
 
 
-_brain = None
+@lru_cache(maxsize=1)
+def _policy():
+    try:
+        return Brain.load()
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"No trained brain at {BRAIN_PATH}. Run "
+            "`uv run python -m chatgpt_ai.train` before racing. "
+            "Training was not run during code creation."
+        ) from error
 
 
 def drive(car, track):
-    """Called once per frame; no race-time access to position or progress."""
-    global _brain
-    if _brain is None:
-        with Path(__file__).with_name("brain.json").open() as source:
-            _brain = Brain(json.load(source)["weights"])
-    _brain.drive(car, track)
+    # Normalization uses the game settings exported by training with the brain,
+    # so this module never imports the game or opens another window.
+    brain, ray_length, max_speed = _race_policy()
+    control(brain, car, track, ray_length, max_speed)
+
+
+@lru_cache(maxsize=1)
+def _race_policy():
+    import json
+    import math
+
+    brain = _policy()
+    with BRAIN_PATH.open() as handle:
+        settings = json.load(handle)["normalization"]
+    ray_length = float(settings["ray_length"])
+    max_speed = float(settings["max_speed"])
+    if not all(math.isfinite(value) and value > 0 for value in (ray_length, max_speed)):
+        raise ValueError("Invalid saved input normalization")
+    return brain, ray_length, max_speed
