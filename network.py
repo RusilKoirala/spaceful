@@ -37,6 +37,16 @@ class Level:
         return self.outputs
 
 
-lvl = Level(3,2)
-print(lvl.weights)
-print(lvl.feed_forward([0.9,0.2,0.1]))
+
+class NeuralNetwork:
+    def __init__(self,sizes):
+        self.levels = []
+        for i in range(len(sizes)-1):
+            self.levels.append(Level(sizes[i],sizes[i+1]))
+    
+    def feed_forward(self,inputs):
+        outputs= inputs
+        for level in self.levels:
+            outputs = level.feed_forward(outputs)
+        return outputs
+

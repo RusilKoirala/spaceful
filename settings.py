@@ -4,10 +4,10 @@ FPS = 60
 
 ACCELERATION = 0.08
 FRICTION = 0.04
-ROTATION_SPEED = 1.2
+ROTATION_SPEED = 3.0
 MAX_SPEED=2
 
-CAR_SIZE = (20, 10)
+CAR_SIZE = (14, 7)
 
 
 START_GRID = [
@@ -23,11 +23,12 @@ RAY_LENGTH = 200
 RAY_STEP = 2
 
 
-# Kill a car that stays slower than STALL_SPEED for STALL_FRAMES frames
-STALL_SPEED = 0.1
 STALL_FRAMES = 180
-# Hard limit on how long one round can last
+MIN_PROGRESS = 40
+
+LAPS = 1
+
 ROUND_FRAMES = FPS * 60
 
 
-TEST = True 
+TEST = False 

@@ -14,9 +14,16 @@ class SpaceCar:
         self.angle = angle
         self.speed = 0
         self.alive = True
+        self.crashed = False
+        self.finished = False
+        self.finish_frame = None
         self.frames_alive = 0
-        self.stall_frames = 0
-        # Score: total forward distance driven (reversing doesn't count)
+        
+        self.progress = 0
+        self.laps = 0
+        self.last_spot = None
+        self.check_progress = 0
+       
         self.distance = 0
 
     def get_rotated(self):
@@ -24,13 +31,13 @@ class SpaceCar:
         rect = rotated_image.get_rect(center=(self.x, self.y))
         return rotated_image, rect
 
-    def draw(self, win, track):
+    def draw(self, win, track, show_rays=True):
         rotated_image, rect = self.get_rotated()
-        if not self.alive:
+        if not self.alive and not self.finished:
             rotated_image.set_alpha(80)
         win.blit(rotated_image, rect.topleft)
 
-        if not self.alive:
+        if not self.alive or not show_rays:
             return
 
         for offset in OFFSETS:
@@ -76,15 +83,45 @@ class SpaceCar:
         self.update_position()
         self.frames_alive += 1
         self.distance += max(self.speed, 0)
+        self.update_progress(track)
 
-        if self.speed < STALL_SPEED:
-            self.stall_frames += 1
-        else:
-            self.stall_frames = 0
-
-        if self.stall_frames >= STALL_FRAMES or self.collide(track.mask, track.x, track.y):
+        if self.laps >= LAPS:
+            # crossed the finish line: park the car, its race is done
+            self.finished = True
+            self.finish_frame = self.frames_alive
             self.alive = False
             self.speed = 0
+            return
+
+        if self.collide(track.mask, track.x, track.y):
+            self.crashed = True
+            self.alive = False
+            self.speed = 0
+        elif self.frames_alive % STALL_FRAMES == 0:
+            if self.progress - self.check_progress < MIN_PROGRESS:
+                self.alive = False
+                self.speed = 0
+            self.check_progress = self.progress
+
+    def update_progress(self, track):
+        spot = track.progress_at(self.x, self.y)
+        if spot < 0:
+            return
+        if self.last_spot is None:
+            self.last_spot = spot
+
+        change = spot - self.last_spot
+        if change < -track.lap_length / 2:
+            # jumped from the end of the lap back to the start: finished a lap
+            change += track.lap_length
+            self.laps += 1
+        elif change > track.lap_length / 2:
+            # jumped from the start back to the end: crossed the line going backwards
+            change -= track.lap_length
+            self.laps -= 1
+
+        self.progress += change
+        self.last_spot = spot
 
     def cast_ray(self, track, offset):
         radians = math.radians(self.angle+offset)
