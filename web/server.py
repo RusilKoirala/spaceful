@@ -124,6 +124,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_HEAD(self):
+        # same headers as GET, no body (send_file and events check self.command)
+        self.do_GET()
+
     def do_POST(self):
         if self.path != "/start":
             return self.send_error(404)
@@ -143,7 +147,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if self.command != "HEAD":
+            self.wfile.write(data)
 
     def events(self):
         # server-sent events: one JSON message per race update
@@ -151,6 +156,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        if self.command == "HEAD":
+            return
         seen = -1
         try:
             while True:
