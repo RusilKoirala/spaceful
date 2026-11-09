@@ -1,0 +1,12 @@
+# on the vm:  docker compose up -d    then open http://<vm-ip>:5555
+services:
+  spaceful:
+    image: ghcr.io/rusilkoirala/spaceful:latest
+    ports:
+      - "5555:5555"
+    restart: unless-stopped
+
+    # uncomment to use brains from the vm instead of the ones baked into the image
+    # (the folder must have all 4 files or those AIs get skipped)
+    # volumes:
+    #   - ./arena_brains:/app/arena_brains:ro
