@@ -1,5 +1,7 @@
 import random
 
+
+# simple neural network
 class Level:
     def __init__(self, inputCount, outputCount):
         self.inputs = [0] * inputCount
