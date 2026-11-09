@@ -1,5 +1,4 @@
 
-#   uv run python -m rusil_ai.train
 import copy
 import os
 import pickle
@@ -13,7 +12,7 @@ from rusil_ai.agent import drive
 
 def fitness(car):
     
-    # progress only counts driving the right way round the track
+   
     progress = max(car.progress, 0)
     avg_speed = progress / car.frames_alive if car.frames_alive else 0
    
@@ -21,14 +20,12 @@ def fitness(car):
     if car.crashed:
         score *= CRASH_PENALTY
     if car.finished:
-        # faster finish = higher average speed = higher score already, plus a bonus for finishing at all
+       
         score *= FINISH_BONUS
     return score
 
 
 def spawn_population(pool):
-    # The breeding pool (last round's best cars) drive again unchanged (red).
-    # Everyone else is a child of two random parents from the pool, plus a little mutation (blue).
     cars = []
     x, y, angle = START_GRID[0]
     for i in range(POPULATION):
