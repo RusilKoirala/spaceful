@@ -2,10 +2,12 @@
 #   uv run python arena.py
 #  
 # uv run python arena.py --population 40 --generations 50
+#   uv run python arena.py --population 40 --generations 50 --resume   (continue from saved brains)
 # Each AI keeps its own network, driver, crossover and mutation code. The arena only
 # shares the environment: population size, elites, parent pool, mutation, start slot,
 # frame limit, fitness, and every generation starts and ends at the same time for all.
-# Everyone starts from random weights every run: no saved or hand-tuned brains are loaded.
+# Everyone starts from random weights unless --resume is given, which continues from the
+# brains last saved in arena_brains/ (the rest of the population is bred from them).
 #
 # Keys: UP / DOWN = simulation speed, R = toggle leader rays
 import argparse
@@ -59,6 +61,10 @@ class Rusil:
         with open(path, "wb") as f:
             pickle.dump(brains, f)   # same breeding-pool format rusil_ai.train loads
 
+    def load(self, path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
 
 class ChatGPT:
     name, color = "ChatGPT", (255, 255, 255)
@@ -84,6 +90,9 @@ class ChatGPT:
                        "weights": list(brains[0].weights),
                        "normalization": {"ray_length": RAY_LENGTH, "max_speed": MAX_SPEED}}, f, indent=2)
 
+    def load(self, path):
+        return [ChatGPTBrain.load(path)]
+
 
 class Gemini:
     name, color = "Gemini", (0, 0, 255)
@@ -106,6 +115,11 @@ class Gemini:
     def save(self, brains, path):
         brains[0].save(path)
 
+    def load(self, path):
+        brain = GeminiNetwork()
+        brain.load(path)
+        return [brain]
+
 
 class Claude:
     name, color = "Claude", (255, 165, 0)
@@ -126,6 +140,9 @@ class Claude:
     def save(self, brains, path):
         brains[0].save(path)
 
+    def load(self, path):
+        return [ClaudeNetwork.load(path)]
+
 
 # ---- one team = one AI's population ----
 
@@ -137,13 +154,27 @@ class Team:
         small = (round(CAR_SIZE[0] * SCALE), round(CAR_SIZE[1] * SCALE))
         self.small_image = pygame.transform.scale(self.image, small)
         self.path = os.path.join(SAVE_DIR, ai.file)
-        self.brains = [ai.new() for _ in range(args.population)]
+        self.brains = self.load_saved() if args.resume else []
+        self.brains += [ai.new() for _ in range(args.population - len(self.brains))]
 
         self.best_score = -1
         self.best_lap = None
         self.best_lap_gen = None
         self.last = "-"
         self.spawn()
+
+    def load_saved(self):
+        # keep the saved brains as-is, breed the rest of the population from them
+        if not os.path.exists(self.path):
+            print(f"{self.ai.name}: no saved brain, starting from random weights")
+            return []
+        saved = self.ai.load(self.path)[:self.args.population]
+        brains = list(saved)
+        while len(brains) < self.args.population:
+            child = self.ai.crossover(random.choice(saved), random.choice(saved))
+            brains.append(self.ai.mutate(child, self.args.mutation))
+        print(f"{self.ai.name}: resumed from {len(saved)} saved brain(s)")
+        return brains
 
     def spawn(self):
         x, y, angle = START_GRID[self.args.slot]
@@ -265,6 +296,7 @@ def main():
     parser.add_argument("--parents", type=int, default=None, help="top brains allowed to breed (default population/4)")
     parser.add_argument("--mutation", type=float, default=0.1, help="mutation rate passed to every AI")
     parser.add_argument("--generations", type=int, default=0, help="stop after this many (0 = run until closed)")
+    parser.add_argument("--resume", action="store_true", help="continue from the brains saved in arena_brains/")
     parser.add_argument("--slot", type=int, default=0, help="START_GRID slot every car starts from")
     args = parser.parse_args()
     args.parents = max(2, args.parents or args.population // 4)
